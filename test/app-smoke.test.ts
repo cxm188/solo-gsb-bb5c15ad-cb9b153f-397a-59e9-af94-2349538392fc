@@ -853,6 +853,225 @@ console.log('  ✓ 冲突审阅面板（含忽略折叠与交叠高亮）渲染�
   cs3.remove()
 }
 
+// 训练集划分导出：输入百分比+种子 → 统计实时出现 → 下载三个 JSONL（整组不拆分、排除待处理）
+{
+  const splitText = '零一二三四五六七八九'
+  const mkAnn = (id: string, start: number, end: number, status: 'bound' | 'pending' = 'bound') => ({
+    id,
+    quote: splitText.slice(start, end),
+    start,
+    end,
+    note: `备注-${id}`,
+    tags: id.startsWith('tr_a') ? ['甲', '乙'] : ['甲'],
+    status,
+    createdAt: 1,
+    updatedAt: 1,
+    contextBefore: '',
+    contextAfter: '',
+    ...(status === 'pending' ? { pendingReason: '找不到引文' } : {}),
+  })
+  const splitDoc = {
+    title: '划分文档',
+    text: splitText,
+    updatedAt: Date.now(),
+    annotations: [
+      // tr_a[0,3) 与 tr_b[2,5) 字符交叠 → 同一连通组（2 标注）
+      mkAnn('tr_a', 0, 3),
+      mkAnn('tr_b', 2, 5),
+      // tr_c[6,8) 独立；tr_d[8,10) 端点相接不连通 → 两个单标注组
+      mkAnn('tr_c', 6, 8),
+      mkAnn('tr_d', 8, 10),
+      // 待处理：不参与、不导出
+      mkAnn('tr_p', 40, 50, 'pending'),
+    ],
+  }
+  localStorage.setItem('anchor-annotation-console:v1', JSON.stringify(splitDoc))
+  const cd = document.createElement('div')
+  cd.id = 'rootsplit'
+  document.body.appendChild(cd)
+  const splitRoot = createRoot(cd)
+
+  await new Promise<void>((resolve) => {
+    splitRoot.render(React.createElement(React.StrictMode, null, React.createElement(App)))
+    setTimeout(resolve, 100)
+  })
+
+  // 截获下载：记录文件名与文本内容（jsdom 不实现 createObjectURL，且 anchor.click 会报未实现导航）
+  const downloads: Array<{ filename: string; content: string }> = []
+  const capturedBlobs = new Map<string, string>()
+  const NativeBlob = window.Blob
+  class CapturedBlob {
+    content: string
+    type: string
+    constructor(parts: Array<BlobPart>, options?: BlobPropertyBag) {
+      this.content = parts.map((p) => String(p)).join('')
+      this.type = options?.type ?? ''
+    }
+  }
+  ;(globalThis as unknown as { Blob: typeof Blob }).Blob = CapturedBlob as unknown as typeof Blob
+  window.Blob = CapturedBlob as unknown as typeof Blob
+  const origCreate = URL.createObjectURL?.bind(URL)
+  const origRevoke = URL.revokeObjectURL?.bind(URL)
+  URL.createObjectURL = (obj: Blob) => {
+    const content = (obj as unknown as { content: string }).content ?? ''
+    const url = `blob:captured-${capturedBlobs.size}`
+    capturedBlobs.set(url, content)
+    return url
+  }
+  URL.revokeObjectURL = () => {}
+  const origClick = window.HTMLAnchorElement.prototype.click
+  window.HTMLAnchorElement.prototype.click = function click(this: HTMLAnchorElement) {
+    if (this.download) {
+      downloads.push({
+        filename: this.download,
+        content: capturedBlobs.get((this as unknown as { href: string }).href) ?? '',
+      })
+      return
+    }
+    return origClick.call(this)
+  }
+
+  const setNativeValue = (el: HTMLInputElement | HTMLTextAreaElement, v: string) => {
+    Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!.call(el, v)
+    el.dispatchEvent(new window.Event('input', { bubbles: true }))
+  }
+  const wait = () => new Promise<void>((resolve) => setTimeout(resolve, 50))
+  const clickButtonIn = (rootEl: HTMLElement, text: string) => {
+    const btn = [...rootEl.querySelectorAll('button')].find(
+      (b) => b.textContent?.trim() === text,
+    ) as HTMLButtonElement | undefined
+    assert.ok(btn, `应存在按钮「${text}」`)
+    btn!.click()
+    return btn!
+  }
+
+  const html0 = cd.innerHTML
+  assert.ok(html0.includes('训练集划分导出'), '应渲染训练集划分导出分区')
+  assert.ok(html0.includes('划分导出'), '顶栏应出现划分导出入口')
+  // 默认 80/10/10 已实时给出统计；待处理排除数显示
+  assert.ok(html0.includes('1 条待处理标注已排除'), '应显示 1 条待处理标注被排除')
+  assert.ok(html0.includes('连通组'), '应显示连通组统计')
+
+  // 校验：合计非 100 时报错、不显示下载
+  setNativeValue(cd.querySelector('#split-percent-train') as HTMLInputElement, '70')
+  setNativeValue(cd.querySelector('#split-percent-validation') as HTMLInputElement, '10')
+  setNativeValue(cd.querySelector('#split-percent-test') as HTMLInputElement, '10')
+  await wait()
+  assert.ok(cd.innerHTML.includes('合计须为 100'), '合计 90 应报错')
+
+  // 合法：50 / 25 / 25 + 固定种子
+  setNativeValue(cd.querySelector('#split-percent-train') as HTMLInputElement, '50')
+  setNativeValue(cd.querySelector('#split-percent-validation') as HTMLInputElement, '25')
+  setNativeValue(cd.querySelector('#split-percent-test') as HTMLInputElement, '25')
+  setNativeValue(cd.querySelector('#split-seed') as HTMLInputElement, '固定划分种子')
+  await wait()
+  assert.ok(!cd.innerHTML.includes('合计须为 100'), '合法输入不应报错')
+  const statText = cd.querySelector('.split-stats')?.textContent ?? ''
+  assert.ok(statText.includes('组'), '统计应含组数')
+  assert.ok(statText.includes('条标注'), '统计应含标注数')
+  assert.ok(statText.includes('实际'), '统计应含实际占比')
+
+  // 下载三个集合
+  for (const s of ['train', 'validation', 'test']) {
+    clickButtonIn(cd, `下载 ${s}.jsonl`)
+    await wait()
+  }
+  assert.strictEqual(downloads.length, 3, '应触发三个 JSONL 下载')
+  const rowsBySplit = new Map<string, Array<Record<string, unknown>>>()
+  let totalLines = 0
+  for (const d of downloads) {
+    assert.ok(d.filename.endsWith('.jsonl') && d.filename.includes('划分文档'), `文件名应含集合与标题：${d.filename}`)
+    const split = ['train', 'validation', 'test'].find((s) => d.filename.includes(`_${s}_`))!
+    const lines = d.content.trim() ? d.content.trim().split('\n') : []
+    totalLines += lines.length
+    const rows = lines.map((l) => JSON.parse(l) as Record<string, unknown>)
+    rowsBySplit.set(split, rows)
+  }
+  assert.strictEqual(totalLines, 3, '三个集合合计应有 3 行（3 个连通组）')
+
+  // 每行：标题、原文、集合名、组内标注 ID/区间/引文/标签/备注
+  const groupMemberships = new Map<string, string>()
+  for (const [split, rows] of rowsBySplit) {
+    for (const row of rows) {
+      assert.strictEqual(row.title, '划分文档')
+      assert.strictEqual(row.text, splitText)
+      assert.strictEqual(row.split, split)
+      assert.strictEqual(typeof row.groupHash, 'string')
+      const anns = row.annotations as Array<Record<string, unknown>>
+      assert.ok(anns.length >= 1)
+      for (const a of anns) {
+        assert.ok(typeof a.id === 'string' && typeof a.start === 'number' && typeof a.end === 'number')
+        assert.ok(typeof a.quote === 'string' && Array.isArray(a.tags) && typeof a.note === 'string')
+        assert.strictEqual((a.note as string), `备注-${a.id as string}`)
+        assert.ok(!(a.id as string).startsWith('tr_p'), '待处理标注不得导出')
+        assert.ok(!groupMemberships.has(a.id as string), `标注 ${a.id as string} 不得跨集合出现`)
+        groupMemberships.set(a.id as string, split)
+      }
+    }
+  }
+  assert.strictEqual(groupMemberships.size, 4, '4 条已绑定标注都应出现且仅出现一次')
+  // tr_a / tr_b 字符交叠，必须在同一集合
+  assert.strictEqual(
+    groupMemberships.get('tr_a'),
+    groupMemberships.get('tr_b'),
+    '区间交叠的 tr_a/tr_b 必须同组同集合',
+  )
+  // tr_c 与 tr_d 端点相接不连通，不强制同集合
+
+  // 确定性：相同种子与百分比重新挂载后，每个组的集合归属完全一致
+  splitRoot.unmount()
+  const cd2 = document.createElement('div')
+  cd2.id = 'rootsplit2'
+  document.body.appendChild(cd2)
+  const splitRoot2 = createRoot(cd2)
+  await new Promise<void>((resolve) => {
+    splitRoot2.render(React.createElement(React.StrictMode, null, React.createElement(App)))
+    setTimeout(resolve, 100)
+  })
+  downloads.length = 0
+  capturedBlobs.clear()
+  // 表单是组件本地状态，重新挂载后需重新填入相同参数
+  const setNV = (el: Element | null, v: string) => {
+    const input = el as HTMLInputElement
+    Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!.call(input, v)
+    input.dispatchEvent(new window.Event('input', { bubbles: true }))
+  }
+  setNV(cd2.querySelector('#split-percent-train'), '50')
+  setNV(cd2.querySelector('#split-percent-validation'), '25')
+  setNV(cd2.querySelector('#split-percent-test'), '25')
+  setNV(cd2.querySelector('#split-seed'), '固定划分种子')
+  await wait()
+  for (const s of ['train', 'validation', 'test']) {
+    clickButtonIn(cd2, `下载 ${s}.jsonl`)
+    await wait()
+  }
+  const memberships2 = new Map<string, string>()
+  for (const d of downloads) {
+    const split = ['train', 'validation', 'test'].find((s) => d.filename.includes(`_${s}_`))!
+    for (const line of d.content.trim().split('\n').filter(Boolean)) {
+      const row = JSON.parse(line) as { annotations: Array<{ id: string }> }
+      for (const a of row.annotations) memberships2.set(a.id, split)
+    }
+  }
+  assert.deepStrictEqual(
+    [...memberships2.entries()].sort(),
+    [...groupMemberships.entries()].sort(),
+    '相同种子/百分比/标注集重新挂载后划分必须完全一致',
+  )
+  console.log('  ✓ 训练集划分导出：百分比/种子校验、连通组整组不拆分、待处理排除、JSONL 下载与确定性')
+
+  // 还原全局桩
+  ;(globalThis as unknown as { Blob: typeof Blob }).Blob = NativeBlob
+  window.Blob = NativeBlob
+  if (origCreate) URL.createObjectURL = origCreate
+  if (origRevoke) URL.revokeObjectURL = origRevoke
+  window.HTMLAnchorElement.prototype.click = origClick
+
+  splitRoot2.unmount()
+  cd2.remove()
+  cd.remove()
+}
+
 // 旧版数据（无 conflictRules / ignoredConflicts 字段）应无损加载
 const legacy = {
   title: '旧文档',

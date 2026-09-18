@@ -17,8 +17,11 @@ import type { SnapshotDiffItem } from '../lib/snapshot'
 import type { SampleQueueResult } from '../lib/sampling'
 import { SnapshotSection } from './SnapshotSection'
 import { SamplingSection } from './SamplingSection'
+import { SplitSection } from './SplitSection'
 
 interface Props {
+  /** 文档标题（训练集划分导出的 JSONL 每行包含） */
+  docTitle: string
   text: string
   annotations: Annotation[]
   activeId: string | null
@@ -54,6 +57,8 @@ interface Props {
   ) => void
   /** 抽样复核分区的滚动定位 ref（顶栏按钮用） */
   samplingSectionRef?: RefObject<HTMLElement | null>
+  /** 训练集划分导出分区的滚动定位 ref（顶栏按钮用） */
+  splitSectionRef?: RefObject<HTMLElement | null>
   onFocus: (a: Annotation) => void
   onEdit: (a: Annotation) => void
   onRebindStart: (a: Annotation) => void
@@ -520,6 +525,13 @@ export const Sidebar = forwardRef<HTMLElement, Props>(function Sidebar(props, se
         onSetReview={props.onSetSampleReview}
         onFocus={props.onFocus}
         sectionRef={props.samplingSectionRef}
+      />
+
+      <SplitSection
+        title={props.docTitle}
+        text={props.text}
+        annotations={props.annotations}
+        sectionRef={props.splitSectionRef}
       />
 
       <section className="side-section" ref={sectionRef as React.Ref<HTMLElement>}>

@@ -116,6 +116,7 @@ export default function App() {
   const coverageSectionRef = useRef<HTMLElement | null>(null)
   const snapshotSectionRef = useRef<HTMLElement | null>(null)
   const samplingSectionRef = useRef<HTMLElement | null>(null)
+  const splitSectionRef = useRef<HTMLElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // 本地持久化
@@ -536,6 +537,12 @@ export default function App() {
     samplingSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
+  // ---------- 训练集划分导出 ----------
+
+  const scrollToSplit = () => {
+    splitSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
   // ---------- 编辑原文与重定位 ----------
 
   const applyEdit = (title: string, text: string) => {
@@ -882,6 +889,15 @@ export default function App() {
               {pendingSampleCount > 0 && <span className="topbar-count">{pendingSampleCount}</span>}
             </button>
           )}
+          {mode === 'view' && (
+            <button
+              className="btn btn-ghost"
+              onClick={scrollToSplit}
+              title="按区间连通组与种子把已绑定标注稳定划分为 train/validation/test 并导出 JSONL"
+            >
+              划分导出
+            </button>
+          )}
           <button className="btn btn-ghost" onClick={() => fileInputRef.current?.click()}>
             导入 JSON
           </button>
@@ -982,6 +998,7 @@ export default function App() {
 
           <Sidebar
             ref={conflictSectionRef}
+            docTitle={doc.title}
             text={doc.text}
             annotations={doc.annotations}
             activeId={activeId ?? activePairIds?.[0] ?? null}
@@ -1007,6 +1024,7 @@ export default function App() {
             onClearSampleConfig={clearSampleConfig}
             onSetSampleReview={setSampleReview}
             samplingSectionRef={samplingSectionRef}
+            splitSectionRef={splitSectionRef}
             onFocus={focusAnnotation}
             onEdit={(a) =>
               setPopover({
