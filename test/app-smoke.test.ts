@@ -853,6 +853,293 @@ console.log('  ✓ 冲突审阅面板（含忽略折叠与交叠高亮）渲染�
   cs3.remove()
 }
 
+// 训练集划分导出：百分比校验 → 连通分组 → 统计 → 三个 JSONL 分别下载 → 确定性 → 排除待处理
+{
+  // jsdom 不实现 URL.createObjectURL；打桩以避免点击下载抛错
+  const mockCreateObjectURL = function createObjectURL() {
+    return 'blob:mock/1'
+  }
+  const mockRevokeObjectURL = function revokeObjectURL() {}
+  ;(window.URL as unknown as { createObjectURL: typeof mockCreateObjectURL }).createObjectURL =
+    mockCreateObjectURL
+  ;(window.URL as unknown as { revokeObjectURL: typeof mockRevokeObjectURL }).revokeObjectURL =
+    mockRevokeObjectURL
+  ;(globalThis as unknown as { URL: typeof URL }).URL = window.URL
+
+  // 包装 Blob 构造以同步捕获下载内容（app 中的 Blob 经 globalThis 解析）
+  const NativeBlob = window.Blob
+  const blobLog: { content: string }[] = []
+  const MockBlob = function MockBlob(
+    parts: BlobPart[] | undefined,
+    opts?: BlobPropertyBag,
+  ) {
+    blobLog.push({ content: parts ? parts.map(String).join('') : '' })
+    return new NativeBlob(parts as BlobPart[], opts)
+  } as unknown as typeof Blob
+  ;(window as unknown as { Blob: typeof Blob }).Blob = MockBlob
+  ;(globalThis as unknown as { Blob: typeof Blob }).Blob = MockBlob
+
+  const dsText = '零一二三四五六七八九十' // 10 字：10 个单字区间互不交叠
+  const mk = (id: string, start: number, end: number, tags: string[] = []) => ({
+    id,
+    quote: dsText.slice(start, end),
+    start,
+    end,
+    note: `备注-${id}`,
+    tags,
+    status: 'bound',
+    createdAt: 1,
+    updatedAt: 1,
+    contextBefore: '',
+    contextAfter: '',
+  })
+  // 前 4 个位置构造一条传递连通链：[0,2)∩[1,3)∩[2,4)∩[3,5) → 4 条同组；
+  // 另有 6 个独立单字组，共 7 个组 / 10 条已绑定；外加 1 条 pending
+  const dsDoc = {
+    title: '划分文档',
+    text: dsText,
+    updatedAt: Date.now(),
+    annotations: [
+      mk('ds_a', 0, 2, ['甲']),
+      mk('ds_b', 1, 3, ['乙']),
+      mk('ds_c', 2, 4),
+      mk('ds_d', 3, 5),
+      mk('ds_e', 5, 6),
+      mk('ds_f', 6, 7),
+      mk('ds_g', 7, 8),
+      mk('ds_h', 8, 9),
+      mk('ds_i', 9, 10),
+      mk('ds_j', 4, 5), // 与 ds_d=[3,5) 在 [4,5) 交叠 → 并入连通链，共 5 条同组
+      {
+        ...mk('ds_p', 0, 1),
+        status: 'pending',
+        pendingReason: '原文中已找不到该引文，需要手动重新选择',
+      },
+    ],
+  }
+  localStorage.setItem('anchor-annotation-console:v1', JSON.stringify(dsDoc))
+  const cd = document.createElement('div')
+  cd.id = 'rootds'
+  document.body.appendChild(cd)
+  const dr = createRoot(cd)
+
+  await new Promise<void>((resolve) => {
+    dr.render(React.createElement(React.StrictMode, null, React.createElement(App)))
+    setTimeout(resolve, 100)
+  })
+
+  const findButton = (text: string) =>
+    [...cd.querySelectorAll('button')].find((b) =>
+      b.textContent?.trim().startsWith(text),
+    ) as HTMLButtonElement | undefined
+  const clickButton = (text: string) => {
+    const btn = findButton(text)
+    assert.ok(btn, `应存在按钮「${text}」`)
+    btn!.click()
+    return btn!
+  }
+  const setNativeValue = (el: HTMLInputElement | HTMLTextAreaElement, v: string) => {
+    const proto = window.HTMLInputElement.prototype
+    Object.getOwnPropertyDescriptor(proto, 'value')!.set!.call(el, v)
+    el.dispatchEvent(new window.Event('input', { bubbles: true }))
+  }
+  const wait = () => new Promise<void>((resolve) => setTimeout(resolve, 50))
+
+  assert.ok(cd.innerHTML.includes('训练集划分导出'), '应渲染训练集划分导出分区')
+  clickButton('训练集划分') // 顶栏按钮（仅校验可点击/滚动不抛错）
+  assert.ok(cd.querySelector('#split-seed'), '应渲染划分种子输入框')
+  const percentInputs = [...cd.querySelectorAll('.split-percent-input')] as HTMLInputElement[]
+  assert.strictEqual(percentInputs.length, 3, '应渲染 train/validation/test 三个百分比输入')
+  assert.ok(cd.textContent!.includes('待处理标注被排除'), '应提示待处理标注被排除')
+
+  // 1. 非法百分比（合计 90）→ 错误提示，按钮禁用
+  setNativeValue(percentInputs[0], '80')
+  setNativeValue(percentInputs[1], '10')
+  setNativeValue(percentInputs[2], '0')
+  await wait()
+  assert.ok(cd.textContent!.includes('合计须为 100'), '合计不为 100 时应显示错误')
+  assert.ok(
+    (findButton('计算划分') as HTMLButtonElement).disabled,
+    '百分比非法时计算按钮应禁用',
+  )
+
+  // 2. 恢复 80/10/10 并计算：6 个组 → 4/1/1（贪心按组分配）
+  setNativeValue(percentInputs[2], '10')
+  await wait()
+  assert.ok(!cd.textContent!.includes('合计须为 100'))
+  const seedEl = cd.querySelector('#split-seed') as HTMLInputElement
+  setNativeValue(seedEl, '固定划分种子')
+  await wait()
+  clickButton('计算划分')
+  await wait()
+
+  const cdText = () => cd.textContent ?? ''
+  assert.ok(cdText().includes('6 个连通组'), `应报告 6 个连通组：${cdText().slice(0, 400)}`)
+  assert.ok(cdText().includes('10 条已绑定标注'), '应报告 10 条已绑定标注')
+  assert.ok(cdText().includes('排除待处理'), '应显示排除数')
+  assert.ok(/排除待处理\s*1\s*条/.test(cdText()), '排除数应为 1')
+
+  const readStats = () => {
+    const out: Record<string, { groups: number; anns: number }> = {}
+    for (const card of [...cd.querySelectorAll('.split-stat-card')]) {
+      const name = (card.querySelector('.split-stat-key') as HTMLElement).textContent!.trim()
+      const nums = [...card.querySelectorAll('.split-stat-nums > span strong')].map((e) =>
+        Number(e.textContent),
+      )
+      out[name] = { groups: nums[0], anns: nums[1] }
+    }
+    return out
+  }
+  const stats = readStats()
+  assert.strictEqual(stats.train.groups + stats.validation.groups + stats.test.groups, 6)
+  assert.strictEqual(stats.train.anns + stats.validation.anns + stats.test.anns, 10)
+  // 6 组（5 + 1×5）、80/10/10 的贪心结果为 4/1/1
+  assert.deepStrictEqual(
+    { train: stats.train.groups, validation: stats.validation.groups, test: stats.test.groups },
+    { train: 4, validation: 1, test: 1 },
+  )
+  // 五标注连通链必须整体在同一集合
+  let chainDataset = ''
+  for (const line of cd.querySelectorAll('.split-group-item')) {
+    const ids = [...line.querySelectorAll('.split-group-ann-id')].map((e) => e.textContent)
+    if (ids.includes('ds_a')) {
+      assert.deepStrictEqual(ids, ['ds_a', 'ds_b', 'ds_c', 'ds_d', 'ds_j'])
+      chainDataset = 'found'
+    }
+  }
+  assert.strictEqual(chainDataset, 'found', '明细中应展示 5 标注连通链整组')
+
+  // 三个下载按钮均存在：train 4 行、validation 1 行、test 1 行
+  assert.ok(findButton('下载 train.jsonl'), '应有 train 下载按钮')
+  assert.ok(findButton('下载 validation.jsonl'), '应有 validation 下载按钮')
+  const testBtn = findButton('下载 test.jsonl')!
+  assert.ok(!testBtn.disabled, 'test 有 1 组时下载按钮应可用')
+
+  // 3. 下载 train JSONL：每组一行，字段齐全，且 pending 标注绝不出现
+  blobLog.length = 0
+  clickButton('下载 train.jsonl')
+  await wait()
+  assert.strictEqual(blobLog.length, 1, '点击下载应产生一个 Blob')
+  const trainJsonl = blobLog[0]!.content
+  const trainLines = trainJsonl.split('\n').filter(Boolean)
+  assert.strictEqual(trainLines.length, stats.train.groups, 'train JSONL 行数 = train 组数')
+  const trainRows = trainLines.map((l) => JSON.parse(l))
+  for (const row of trainRows) {
+    assert.strictEqual(row.title, '划分文档')
+    assert.strictEqual(row.text, dsText)
+    assert.strictEqual(row.dataset, 'train')
+    assert.ok(Array.isArray(row.group.annotationIds) && row.group.annotationIds.length > 0)
+    for (const a of row.group.annotations) {
+      assert.ok(typeof a.position.start === 'number')
+      assert.ok(typeof a.quote === 'string')
+      assert.ok(Array.isArray(a.tags))
+      assert.ok(typeof a.note === 'string')
+    }
+  }
+  assert.ok(!trainJsonl.includes('ds_p'), '待处理标注不得出现在导出中')
+  // 连通链整组出现在某一行（且只出现一次）
+  const chainLineCount = trainRows.filter((r) =>
+    r.group.annotationIds.includes('ds_a'),
+  ).length
+  const chainInTrain = chainLineCount === 1
+  let chainKeptAtomic = true
+  for (const row of trainRows) {
+    const ids = row.group.annotationIds
+    if (ids.includes('ds_a')) {
+      chainKeptAtomic =
+        ids.includes('ds_b') && ids.includes('ds_c') && ids.includes('ds_d') && ids.includes('ds_j')
+    }
+  }
+  assert.ok(chainInTrain && chainKeptAtomic, '连通链应整组出现在 train 的同一行')
+
+  // 下载 validation
+  blobLog.length = 0
+  clickButton('下载 validation.jsonl')
+  await wait()
+  const valLines = blobLog[0]!.content.split('\n').filter(Boolean)
+  assert.strictEqual(valLines.length, stats.validation.groups)
+  assert.strictEqual(JSON.parse(valLines[0]!).dataset, 'validation')
+
+  // 4. 确定性：相同种子 / 百分比 / 标注集，重新挂载后划分完全一致
+  dr.unmount()
+  const cd2 = document.createElement('div')
+  cd2.id = 'rootds2'
+  document.body.appendChild(cd2)
+  const dr2 = createRoot(cd2)
+  await new Promise<void>((resolve) => {
+    dr2.render(React.createElement(React.StrictMode, null, React.createElement(App)))
+    setTimeout(resolve, 100)
+  })
+  const inputs2 = [...cd2.querySelectorAll('.split-percent-input')] as HTMLInputElement[]
+  setNativeValue(inputs2[0], '80')
+  setNativeValue(inputs2[1], '10')
+  setNativeValue(inputs2[2], '10')
+  setNativeValue(cd2.querySelector('#split-seed') as HTMLInputElement, '固定划分种子')
+  await wait()
+  ;([...cd2.querySelectorAll('button')].find(
+    (b) => b.textContent?.trim() === '计算划分',
+  ) as HTMLButtonElement).click()
+  await wait()
+  const stats2 = (() => {
+    const out: Record<string, { groups: number; anns: number }> = {}
+    for (const card of [...cd2.querySelectorAll('.split-stat-card')]) {
+      const name = (card.querySelector('.split-stat-key') as HTMLElement).textContent!.trim()
+      const nums = [...card.querySelectorAll('.split-stat-nums > span strong')].map((e) =>
+        Number(e.textContent),
+      )
+      out[name] = { groups: nums[0], anns: nums[1] }
+    }
+    return out
+  })()
+  assert.deepStrictEqual(stats2, stats, '相同输入重新挂载后统计必须一致')
+
+  // 5. 10 个独立组（无交叠、无 pending）时 80/10/10 → 8/1/1，三个文件都可下载
+  const soloDoc = {
+    title: '独立组文档',
+    text: dsText,
+    updatedAt: Date.now(),
+    annotations: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((i) => mk(`so_${i}`, i, i + 1)),
+  }
+  localStorage.setItem('anchor-annotation-console:v1', JSON.stringify(soloDoc))
+  dr2.unmount()
+  const cd3 = document.createElement('div')
+  cd3.id = 'rootds3'
+  document.body.appendChild(cd3)
+  const dr3 = createRoot(cd3)
+  await new Promise<void>((resolve) => {
+    dr3.render(React.createElement(React.StrictMode, null, React.createElement(App)))
+    setTimeout(resolve, 100)
+  })
+  const inputs3 = [...cd3.querySelectorAll('.split-percent-input')] as HTMLInputElement[]
+  setNativeValue(inputs3[0], '80')
+  setNativeValue(inputs3[1], '10')
+  setNativeValue(inputs3[2], '10')
+  await wait()
+  ;([...cd3.querySelectorAll('button')].find(
+    (b) => b.textContent?.trim() === '计算划分',
+  ) as HTMLButtonElement).click()
+  await wait()
+  assert.ok(cd3.textContent!.includes('10 个连通组'))
+  assert.ok(!cd3.textContent!.includes('待处理标注被排除'), '无 pending 时不显示排除提示')
+  assert.ok(!cd3.textContent!.includes('排除待处理'))
+  const testBtn3 = [...cd3.querySelectorAll('button')].find((b) =>
+    b.textContent?.includes('下载 test.jsonl'),
+  ) as HTMLButtonElement
+  assert.ok(!testBtn3.disabled, 'test 有 1 组时下载按钮应可用')
+  blobLog.length = 0
+  testBtn3.click()
+  await wait()
+  const testLines = blobLog[0]!.content.split('\n').filter(Boolean)
+  assert.strictEqual(testLines.length, 1)
+  assert.strictEqual(JSON.parse(testLines[0]!).dataset, 'test')
+  console.log('  ✓ 训练集划分导出：校验、连通分组、统计、JSONL 下载、确定性与待处理排除')
+
+  dr3.unmount()
+  cd.remove()
+  cd2.remove()
+  cd3.remove()
+}
+
 // 旧版数据（无 conflictRules / ignoredConflicts 字段）应无损加载
 const legacy = {
   title: '旧文档',

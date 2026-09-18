@@ -116,6 +116,7 @@ export default function App() {
   const coverageSectionRef = useRef<HTMLElement | null>(null)
   const snapshotSectionRef = useRef<HTMLElement | null>(null)
   const samplingSectionRef = useRef<HTMLElement | null>(null)
+  const datasetSplitSectionRef = useRef<HTMLElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // 本地持久化
@@ -536,6 +537,10 @@ export default function App() {
     samplingSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
+  const scrollToDatasetSplit = () => {
+    datasetSplitSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
   // ---------- 编辑原文与重定位 ----------
 
   const applyEdit = (title: string, text: string) => {
@@ -882,6 +887,15 @@ export default function App() {
               {pendingSampleCount > 0 && <span className="topbar-count">{pendingSampleCount}</span>}
             </button>
           )}
+          {mode === 'view' && (
+            <button
+              className="btn btn-ghost"
+              onClick={scrollToDatasetSplit}
+              title="按区间连通组与稳定种子划分 train / validation / test 并导出 JSONL"
+            >
+              训练集划分
+            </button>
+          )}
           <button className="btn btn-ghost" onClick={() => fileInputRef.current?.click()}>
             导入 JSON
           </button>
@@ -982,6 +996,7 @@ export default function App() {
 
           <Sidebar
             ref={conflictSectionRef}
+            title={doc.title}
             text={doc.text}
             annotations={doc.annotations}
             activeId={activeId ?? activePairIds?.[0] ?? null}
@@ -1007,6 +1022,7 @@ export default function App() {
             onClearSampleConfig={clearSampleConfig}
             onSetSampleReview={setSampleReview}
             samplingSectionRef={samplingSectionRef}
+            datasetSplitSectionRef={datasetSplitSectionRef}
             onFocus={focusAnnotation}
             onEdit={(a) =>
               setPopover({
